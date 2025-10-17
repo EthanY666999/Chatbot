@@ -35,8 +35,11 @@ src/
 ├── prompt.py       # system prompts and reasoning templates
 ├── main.py         # CLI entry point
 └── ingest.py       # data ingestion for RAG
+```
 
-```Run the chatbot:
+
+
+**```Run the chatbot:
 python -m src.src.main
 
 You’ll see:
