@@ -35,8 +35,9 @@ src/
 ├── prompt.py       # system prompts and reasoning templates
 ├── main.py         # CLI entry point
 └── ingest.py       # data ingestion for RAG
-### Run the chatbot:
--python -m src.src.main
+
+```Run the chatbot:
+python -m src.src.main
 
 You’ll see:
 -🤖 Chatbot 已启动，输入 'exit' 退出。
