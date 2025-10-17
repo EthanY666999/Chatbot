@@ -27,14 +27,14 @@ This project demonstrates how to integrate **short-term memory**, **long-term ve
 - Easy to extend with more tools (search, file agents, etc.)
 - Separated modules:
 
+```bash
 src/
-├── config.py # environment configs and constants
-├── embeddings.py # embedding model wrapper
-├── memory.py # ChatMemory + VectorMemory (RAG)
-├── prompt.py # system prompts and reasoning templates
-├── main.py # CLI entry point
-└── ingest.py # data ingestion for RAG
-
+├── config.py       # environment configs and constants
+├── embeddings.py   # embedding model wrapper
+├── memory.py       # ChatMemory + VectorMemory (RAG)
+├── prompt.py       # system prompts and reasoning templates
+├── main.py         # CLI entry point
+└── ingest.py       # data ingestion for RAG
 ### Run the chatbot:
 -python -m src.src.main
 
