@@ -23,15 +23,17 @@ This project demonstrates how to integrate **short-term memory**, **long-term ve
 - CoT is implemented at the prompt level with an optional `cot` command.
 
 ### 4. ⚙️ Modular Design
+
 - Easy to extend with more tools (search, file agents, etc.)
 - Separated modules:
-- src/
--├── config.py # environment configs and constants
--├── embeddings.py # embedding model wrapper
--├── memory.py # ChatMemory + VectorMemory (RAG)
--├── prompt.py # system prompts and reasoning templates
--├── main.py # CLI entry point
--└── ingest.py # data ingestion for RAG
+
+src/
+├── config.py # environment configs and constants
+├── embeddings.py # embedding model wrapper
+├── memory.py # ChatMemory + VectorMemory (RAG)
+├── prompt.py # system prompts and reasoning templates
+├── main.py # CLI entry point
+└── ingest.py # data ingestion for RAG
 
 ### Run the chatbot:
 -python -m src.src.main
