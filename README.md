@@ -39,13 +39,13 @@ src/
 
 
 
-**```Run the chatbot:
+```Run the chatbot:
 python -m src.src.main
 
 You’ll see:
 -🤖 Chatbot 已启动，输入 'exit' 退出。
 -你:
-
+```
 License
 
 MIT License © 2025 EthanY666999
