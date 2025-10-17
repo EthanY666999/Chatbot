@@ -33,8 +33,8 @@ This project demonstrates how to integrate **short-term memory**, **long-term ve
 -├── main.py # CLI entry point
 -└── ingest.py # data ingestion for RAG
 
-Run the chatbot:
-python -m src.src.main
+### Run the chatbot:
+-python -m src.src.main
 
 You’ll see:
 -🤖 Chatbot 已启动，输入 'exit' 退出。
