@@ -77,32 +77,53 @@ class VectorMemory:
         """
         语义检索：返回按相似度降序排列的结果
         字段：
-          - id: 文档ID
-          - text: 文档内容
-          - meta: 元信息
-          - score: 相似度（0~1，越大越相似）
+        - id: 文档ID
+        - text: 文档内容
+        - meta: 元信息
+        - score: 相似度 [0~1]（越大越相似）
         """
-        if not query_text or self.count() == 0:
+        # 1) 库里没有数据
+        if self.count() == 0:
             return []
 
+        # 2) ✅ 空查询：用于 list memories，直接 peek 前 k 条
+        if not query_text or not query_text.strip():
+            peek = self.col.peek() or {}
+            ids   = (peek.get("ids") or [])[:k]
+            docs  = (peek.get("documents") or [])[:k]
+            metas = (peek.get("metadatas") or [])[:k]
+            return [
+                {"id": _id, "text": doc, "meta": meta, "score": 1.0}
+                for _id, doc, meta in zip(ids, docs, metas)
+            ]
+
+        # 3) 正常语义检索
         q_emb = self.embedder.embed_one(query_text)
         res = self.col.query(query_embeddings=[q_emb], n_results=max(1, k))
 
-        ids = (res.get("ids") or [[]])[0]
-        docs = (res.get("documents") or [[]])[0]
+        ids   = (res.get("ids") or [[]])[0]
+        docs  = (res.get("documents") or [[]])[0]
         metas = (res.get("metadatas") or [[]])[0]
-        dists = (res.get("distances") or [[]])[0] 
+        dists = (res.get("distances") or [[]])[0]  # cosine 距离：越小越相似
 
         out = []
         for _id, doc, meta, dist in zip(ids, docs, metas, dists):
-            out.append(
-                {
-                    "id": _id,
-                    "text": doc,
-                    "meta": meta,
-                    "score": float(1.0 - dist),  
-                }
-            )
+            out.append({"id": _id, "text": doc, "meta": meta, "score": float(1.0 - dist)})
+
+        out.sort(key=lambda x: x["score"], reverse=True)
+        return out
+    # ✅ 正常语义检索
+        q_emb = self.embedder.embed_one(query_text)
+        res = self.col.query(query_embeddings=[q_emb], n_results=max(1, k))
+
+        ids   = (res.get("ids") or [[]])[0]
+        docs  = (res.get("documents") or [[]])[0]
+        metas = (res.get("metadatas") or [[]])[0]
+        dists = (res.get("distances") or [[]])[0]  # cosine 距离
+
+        out = []
+        for _id, doc, meta, dist in zip(ids, docs, metas, dists):
+            out.append({"id": _id, "text": doc, "meta": meta, "score": float(1.0 - dist)})
 
         out.sort(key=lambda x: x["score"], reverse=True)
         return out
@@ -135,6 +156,19 @@ class ChatMemory:
         
         if len(self.turns) > self.max_turns * 2:
             self.turns = self.turns[-self.max_turns * 2:]
+    
+    # 在 ChatMemory 内部添加
+    def get_recent(self, max_msgs: int = 8):
+        """返回最近 max_msgs 条消息（用于做摘要/保存）"""
+        return self.turns[-max_msgs:] if max_msgs > 0 else self.turns[:]
+
+    def to_text(self, max_msgs: int = 8) -> str:
+        """把最近对话压成可保存的纯文本"""
+        parts = []
+        for m in self.get_recent(max_msgs):
+            role = "用户" if m["role"] == "user" else ("助理" if m["role"] == "assistant" else m["role"])
+            parts.append(f"{role}: {m['content']}")
+        return "\n".join(parts).strip()
 
     # 兼容别名
     append = add
