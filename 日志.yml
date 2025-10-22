@@ -22,3 +22,9 @@ chatbot/
 
 # 2025-10-17
 初步做成chatbot agent框架，push到了github，下一步准备对chatbot的CoT进行小创新
+
+# 2025-10-21
+
+修改了没有调用Development Hint的错误
+命令式「保存 / 调用 记忆」
+增加了一些指令
