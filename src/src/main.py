@@ -4,6 +4,90 @@ from .prompt import SYSTEM_PROMPT, DEVELOPER_HINT
 from .memory import VectorMemory, ChatMemory
 import re
 from openai import OpenAI
+
+import os, traceback
+DEBUG = os.getenv("DEBUG", "0") == "1" 
+
+# --- Debug/Logging helpers ---
+import os, time, traceback
+
+DEBUG = os.getenv("DEBUG", "0") == "1"
+
+def log(*args):
+    if DEBUG:
+        print("[DEBUG]", *args)
+
+def warn(*args):
+    print("⚠️", *args)
+
+def oops(title: str, e: Exception):
+    """统一的人类可读错误 & 调试详情"""
+    msg = str(e) or e.__class__.__name__
+    print(f"❌ {title}: {msg}")
+    if DEBUG:
+        traceback.print_exc()
+
+# --- OpenAI 调用重试与错误分类 ---
+RETRYABLE = ("rate_limit", "timeout", "temporarily_unavailable")
+
+def classify_openai_error(text: str) -> str:
+    t = (text or "").lower()
+    if "insufficient_quota" in t or "quota" in t:
+        return "quota"
+    if "invalid_api_key" in t or "authentication" in t or "unauthorized" in t:
+        return "auth"
+    if "model_not_found" in t or "not found" in t:
+        return "model"
+    if "connection" in t or "dns" in t or "resolve host" in t:
+        return "network"
+    if "rate" in t or "429" in t or "retry" in t:
+        return "rate"
+    if "timeout" in t:
+        return "timeout"
+    return "unknown"
+
+def call_openai_with_retry(client, model, messages, temperature=0.7, max_tries=3):
+    """对 429/网络问题做指数退避重试；其它错误给出具体提示"""
+    delay = 1.0
+    for attempt in range(1, max_tries + 1):
+        try:
+            log(f"OpenAI call attempt {attempt}, model={model}, msgs={len(messages)}")
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+        except Exception as e:
+            kind = classify_openai_error(str(e))
+            if kind in ("rate", "timeout", "network") and attempt < max_tries:
+                warn(f"请求暂时失败（{kind}），{delay:.1f}s 后重试…")
+                if DEBUG:
+                    traceback.print_exc()
+                time.sleep(delay)
+                delay *= 2
+                continue
+            # 不可重试或已用尽次数
+            if kind == "quota":
+                oops("额度不足/已用尽（insufficient_quota）", e)
+                print("💡 解决：检查账单/充值或换用可用的 API Key。")
+            elif kind == "auth":
+                oops("鉴权失败（API Key 无效或未配置）", e)
+                print("💡 解决：检查 .env 中的 OPENAI_API_KEY 是否正确；或环境变量是否生效。")
+            elif kind == "model":
+                oops("模型不可用/不存在", e)
+                print("💡 解决：确认 config.CHAT_MODEL 名称无误、账号有权限。")
+            elif kind == "network":
+                oops("网络错误（DNS/连接）", e)
+                print("💡 解决：切换网络/DNS(1.1.1.1/8.8.8.8)，或清理代理。")
+            elif kind == "rate":
+                oops("请求被限速（429）", e)
+                print("💡 解决：降低并发/频率，或提高额度/速率限制。")
+            else:
+                oops("未知错误", e)
+            return None
+        
+
+
 from .config import OPENAI_API_KEY, CHAT_MODEL, VECTOR_DB_PATH
 from .prompt import SYSTEM_PROMPT, DEVELOPER_HINT
 from .memory import VectorMemory, ChatMemory
@@ -70,6 +154,30 @@ def main():
         user_input = input("你：").strip()
         if user_input.lower() in {"exit", "quit"}:
             print("👋 再见！"); break
+        
+        # ---- testerr <kind> ：模拟各种错误，验证报错分支 ----
+        if user_input.lower().startswith("testerr "):
+            kind = user_input.split(" ", 1)[1].strip().lower()
+            def show(title): print(f"🔬 模拟：{title}")
+            if kind == "quota":
+                show("额度用尽"); oops("额度不足/已用尽（insufficient_quota）", Exception("insufficient_quota"))
+            elif kind == "auth":
+                show("鉴权失败"); oops("鉴权失败（API Key 无效或未配置）", Exception("invalid_api_key"))
+            elif kind == "model":
+                show("模型不存在"); oops("模型不可用/不存在", Exception("model_not_found"))
+            elif kind == "network":
+                show("网络/DNS"); oops("网络错误（DNS/连接）", Exception("Could not resolve host"))
+            elif kind == "rate":
+                show("限速429"); oops("请求被限速（429）", Exception("Rate limit exceeded"))
+            elif kind == "timeout":
+                show("超时"); oops("未知错误", Exception("timeout"))
+            elif kind == "parse":
+                show("解析返回失败"); oops("解析 OpenAI 返回内容失败", Exception("list index out of range"))
+            elif kind == "vdb":
+                show("向量库写入失败"); oops("保存记忆失败（向量库写入）", Exception("chroma write failed"))
+            else:
+                print("可选：quota/auth/model/network/rate/timeout/parse/vdb")
+            continue
 
         # ---------- 调试/管理命令 ----------
         # 1) 查看 RAG 命中
@@ -78,20 +186,48 @@ def main():
             _, _, _, block = query_all(vmem_docs, vmem_facts, vmem_notes, q, k_each=8, min_score=0.0)
             print("\n🔎 RAG 命中：\n" + (block or "(无检索结果)")); continue
 
-        # 2) saveas 名称: 内容
+                # 2) saveas 名称: 内容  （支持中文冒号：）
         name, content = extract_saveas(user_input)
         if name and content:
-            vmem_notes.add_memories([content], [{"type":"user_note", "name": name}])
-            print(f"✅ 已保存记忆：{name}"); continue
+            try:
+                vmem_notes.add_memories([content], [{"type": "user_note", "name": name.strip()}])
+                print(f"✅ 已保存记忆：{name.strip()}")
+            except Exception as e:
+                print(f"⚠️ 保存记忆失败（向量库写入）: {e}")
+                if DEBUG:
+                    traceback.print_exc()
+            continue
+        elif user_input.lower().startswith("saveas"):
+            print("⚠️ 用法：saveas 名称: 内容   （支持中文冒号：）")
+            continue
 
+
+        # 3) save / save2 / save3 / save10 ...
         if re.match(r"^save\d*\s", user_input.lower()):
-        # 匹配 save / save2 / save3 / save10 ...
             m = re.match(r"^save(\d*)\s+(.+)$", user_input.strip(), flags=re.I)
+            if not m:
+                print("⚠️ 用法：save[轮数] 名称   例如：save2 项目计划")
+                continue
+
             count_str, name = m.groups()
-            max_msgs = int(count_str) * 2 if count_str else 8  # 每轮2条消息(user+assistant)
-            text = memory.to_text(max_msgs=max_msgs) or "(空)"
-            vmem_notes.add_memories([text], [{"type": "user_note", "name": name}])
-            print(f"✅ 已保存最近 {max_msgs//2} 轮对话为记忆：{name}") 
+            if not name.strip():
+                print("⚠️ 请提供记忆名称，例如：save3 项目计划")
+                continue
+
+            try:
+                # 每轮=2条消息（user+assistant）
+                max_msgs = int(count_str) * 2 if count_str else 8
+            except ValueError:
+                max_msgs = 8
+
+            try:
+                text = memory.to_text(max_msgs=max_msgs) or "(空)"
+                vmem_notes.add_memories([text], [{"type": "user_note", "name": name.strip()}])
+                print(f"✅ 已保存最近 {max_msgs//2} 轮对话为记忆：{name.strip()}")
+            except Exception as e:
+                print(f"⚠️ 保存记忆失败（向量库写入）: {e}")
+                if DEBUG:
+                    traceback.print_exc()
             continue
 
         # 4) list memories
@@ -111,11 +247,22 @@ def main():
             name = user_input.split(" ", 1)[1].strip()
             cand = vmem_notes.query(name, k=1)
             if not cand:
-                print("❌ 未找到可删除的记忆。"); continue
+                print("❌ 未找到可删除的记忆。"); 
+                continue
+
             _id = cand[0]["id"]
-            # Chroma Python 客户端支持 delete(ids=[...])（你的 VectorMemory 没封装，直接用底层）
-            vmem_notes.col.delete(ids=[_id])
-            print(f"🗑️ 已删除：{cand[0].get('meta',{}).get('name','(未命名)')}"); continue
+
+            try:
+                # 尝试删除
+                vmem_notes.col.delete(ids=[_id])
+                print(f"🗑️ 已删除：{cand[0].get('meta', {}).get('name', '(未命名)')}")
+            except Exception as e:
+                print(f"⚠️ 删除记忆失败（向量库）: {e}")
+                # 如果开了调试模式，输出完整堆栈
+                if DEBUG:
+                    import traceback
+                    traceback.print_exc()
+            continue
 
         # 6) recall 名称/关键词 —— 召回并注入上下文
         if user_input.lower().startswith("recall "):
@@ -160,6 +307,33 @@ def main():
 
         print("Chatbot：", reply, "\n")
         memory.add("assistant", reply)
+
+            # ---- 细化分类 ----
+        if "insufficient_quota" in err or "quota" in err:
+            print("💡 原因：API 额度已用完。")
+            print("👉 解决：登录 https://platform.openai.com/account/billing 查看账单或充值。")
+
+        elif "invalid_api_key" in err or "authentication" in err:
+            print("💡 原因：API Key 无效或环境变量未加载。")
+            print("👉 解决：检查 .env 文件或环境变量 OPENAI_API_KEY。")
+
+        elif "model_not_found" in err or "does not exist" in err:
+            print("💡 原因：模型名称错误或你账号无访问权限。")
+            print("👉 解决：检查 config.py 中的 CHAT_MODEL 是否拼写正确。")
+
+        elif "rate limit" in err or "429" in err:
+            print("💡 原因：请求被限速（429）。")
+            print("👉 解决：稍等几秒后再试，或降低调用频率。")
+
+        elif "connection" in err or "resolve host" in err or "timeout" in err:
+            print("💡 原因：网络或 DNS 问题。")
+            print("👉 解决：检查网络连接、代理设置，或更换 DNS（如 8.8.8.8）。")
+
+        else:
+            print("💡 原因未知，请查看完整错误日志以排查。")
+
+        continue  # 跳过本轮，继续下一轮输入
+
 
 if __name__ == "__main__":
     main()
