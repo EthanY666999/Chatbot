@@ -55,3 +55,13 @@ python -m src.src.main
  saveN/saveas/recall/delete/list 在非法输入时给出人类可读的错误文案
 
  DEBUG=1 时出现堆栈；DEBUG 关闭时不出现
+
+# 2025-10-23
+
+optprompt 精简风格: 更口语化、中文优先、分点作答、答案更短
+list prompts
+showprompt 精简风格
+useprompt 精简风格
+# 聊天几句对比效果
+abtest 精简风格: 用两句话总结我们今天做了什么
+revert prompt
