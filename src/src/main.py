@@ -8,6 +8,8 @@ from openai import OpenAI
 import os, traceback
 DEBUG = os.getenv("DEBUG", "0") == "1" 
 
+
+
 # --- Debug/Logging helpers ---
 import os, time, traceback
 
@@ -97,6 +99,10 @@ DOCS_COLLECTION   = "docs"        # 外部文档（ingest写入）
 FACTS_COLLECTION  = "long_term"   # 长期事实（可选）
 NOTES_COLLECTION  = "user_notes"  # ✨ 新增：用户命名记忆
 PERSIST_DIR       = VECTOR_DB_PATH
+PROMPTS_COLLECTION = "prompts_bank"
+
+active_system_prompt = SYSTEM_PROMPT
+active_developer_hint = DEVELOPER_HINT
 
 # ---------- 工具函数 ----------
 def build_recalled_context(recalls, min_score=0.2, max_items=5, label=""):
@@ -140,6 +146,7 @@ def main():
     vmem_docs  = VectorMemory(persist_dir=PERSIST_DIR, collection=DOCS_COLLECTION)
     vmem_facts = VectorMemory(persist_dir=PERSIST_DIR, collection=FACTS_COLLECTION)
     vmem_notes = VectorMemory(persist_dir=PERSIST_DIR, collection=NOTES_COLLECTION)  # 新增集合
+    vmem_prompts = VectorMemory(persist_dir=PERSIST_DIR, collection=PROMPTS_COLLECTION)
 
     print("🤖 Chatbot 已启动，输入 'exit' 退出。")
     print("命令：\n"
@@ -154,6 +161,183 @@ def main():
         user_input = input("你：").strip()
         if user_input.lower() in {"exit", "quit"}:
             print("👋 再见！"); break
+
+        def extract_after_colon(cmd: str):
+            m = re.match(r"^optprompt\s+([^:：]+?)\s*[:：]\s*(.+)$", cmd, flags=re.I)
+            return (m.group(1).strip(), m.group(2).strip()) if m else (None, None)
+
+        def parse_json_maybe(text: str):
+            t = text.strip()
+            m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", t, flags=re.I)
+            if m: t = m.group(1)
+            return json.loads(t)
+
+        PROMPT_ENGINEER = """You are an expert prompt engineer.
+        Given (1) the current SYSTEM_PROMPT and DEVELOPER_HINT, (2) recent conversation transcript,
+        and (3) my optimization goal, produce an improved pair of prompts.
+
+        Constraints:
+        - Output strictly JSON with keys: system_prompt, developer_hint, notes.
+        - Keep the assistant safe, helpful, and grounded.
+        - Encourage concise chain-of-thought OUTLINE (not full internal reasoning) via few bullet planning lines if needed.
+        - Prefer Chinese responses by default when the user speaks Chinese.
+
+        Example JSON:
+        {
+        "system_prompt": "...",
+        "developer_hint": "...",
+        "notes": "why these changes work"
+        }
+        """
+
+        if user_input.lower().startswith("optprompt"):
+            name, goal = extract_after_colon(user_input)
+            if not (name and goal):
+                print("⚠️ 用法：optprompt 名称: 目标（支持中文冒号）"); 
+                continue
+
+            recent = memory.to_text(max_msgs=12) or "(无最近对话)"
+            cur = {"system": active_system_prompt, "developer": active_developer_hint}
+
+            try:
+                resp = client.chat.completions.create(
+                    model=CHAT_MODEL, temperature=0.2,
+                    messages=[
+                        {"role":"system","content":PROMPT_ENGINEER},
+                        {"role":"user","content":f"【当前 SYSTEM_PROMPT】\n{cur['system']}"},
+                        {"role":"user","content":f"【当前 DEVELOPER_HINT】\n{cur['developer']}"},
+                        {"role":"user","content":f"【最近对话（截断）】\n{recent}"},
+                        {"role":"user","content":f"【优化目标】\n{goal}\n请只输出 JSON。"}
+                    ]
+                )
+                text = (resp.choices[0].message.content or "").strip()
+                data = parse_json_maybe(text)
+                new_sys = data.get("system_prompt","").strip()
+                new_dev = data.get("developer_hint","").strip()
+                if not new_sys or not new_dev:
+                    print("⚠️ 优化结果缺少字段，请重试或调整目标。")
+                    if DEBUG: print(text)
+                    continue
+
+                vmem_prompts.add_memories(
+                    [new_sys, new_dev],
+                    [
+                        {"type":"prompt","name":name,"kind":"system"},
+                        {"type":"prompt","name":name,"kind":"developer"},
+                    ]
+                )
+                print(f"✅ 已生成优化 Prompt：{name}\n可用命令：useprompt {name} / showprompt {name}")
+            except Exception as e:
+                print(f"⚠️ 生成优化 Prompt 失败：{e}")
+                if DEBUG: traceback.print_exc()
+            continue
+
+        if user_input.lower().startswith("list prompts"):
+            hits = vmem_prompts.query("", k=100)
+            grouped = {}
+            for h in hits:
+                meta = h.get("meta",{})
+                nm = meta.get("name","(未命名)")
+                grouped.setdefault(nm, []).append(meta.get("kind"))
+            if not grouped:
+                print("（暂无保存的 Prompt）")
+            else:
+                print("🗂 Prompts：")
+                for nm, kinds in grouped.items():
+                    kinds = ",".join(sorted(set(kinds)))
+                    print(f"- {nm}  [{kinds}]")
+            continue
+
+        if user_input.lower().startswith("showprompt "):
+            key = user_input.split(" ",1)[1].strip()
+            hits = vmem_prompts.query(key, k=20)
+            sys_txt, dev_txt = None, None
+            for h in hits:
+                meta = h.get("meta",{})
+                if meta.get("name")==key and meta.get("kind")=="system":
+                    sys_txt = h.get("text")
+                if meta.get("name")==key and meta.get("kind")=="developer":
+                    dev_txt = h.get("text")
+            if not (sys_txt or dev_txt):
+                print("❌ 未找到该 Prompt。")
+            else:
+                print(f"\n--- {key}: SYSTEM_PROMPT ---\n{sys_txt or '(无)'}")
+                print(f"\n--- {key}: DEVELOPER_HINT ---\n{dev_txt or '(无)'}\n")
+            continue
+
+        if user_input.lower().startswith("useprompt "):
+            key = user_input.split(" ",1)[1].strip()
+            hits = vmem_prompts.query(key, k=20)
+            sys_txt, dev_txt = None, None
+            for h in hits:
+                meta = h.get("meta",{})
+                if meta.get("name")==key and meta.get("kind")=="system":
+                    sys_txt = h.get("text")
+                if meta.get("name")==key and meta.get("kind")=="developer":
+                    dev_txt = h.get("text")
+            if not (sys_txt and dev_txt):
+                print("❌ 未找到完整的 Prompt（system/developer）。先执行 showprompt 查看。")
+            else:
+                active_system_prompt = sys_txt
+                active_developer_hint = dev_txt
+                print(f"✅ 已启用 Prompt：{key}")
+            continue
+        
+        if user_input.lower().startswith("revert prompt"):
+            active_system_prompt = SYSTEM_PROMPT
+            active_developer_hint = DEVELOPER_HINT
+            print("↩️ 已回滚为默认 Prompt。")
+            continue
+
+        if user_input.lower().startswith("delprompt "):
+            key = user_input.split(" ",1)[1].strip()
+            hits = vmem_prompts.query(key, k=50)
+            ids = []
+            for h in hits:
+                meta = h.get("meta",{})
+                if meta.get("name")==key and meta.get("type")=="prompt":
+                    ids.append(h["id"])
+            if not ids:
+                print("❌ 未找到要删除的 Prompt。"); 
+                continue
+            try:
+                vmem_prompts.col.delete(ids=ids)
+                print(f"🗑️ 已删除 Prompt：{key}")
+            except Exception as e:
+                print(f"⚠️ 删除失败：{e}")
+                if DEBUG: traceback.print_exc()
+            continue
+
+        if user_input.lower().startswith("abtest "):
+            m = re.match(r"^abtest\s+([^:：]+?)\s*[:：]\s*(.+)$", user_input, flags=re.I)
+            if not m:
+                print("⚠️ 用法：abtest 名称: 问题"); 
+                continue
+            key, question = m.groups()
+            hits = vmem_prompts.query(key, k=20)
+            sys_txt, dev_txt = None, None
+            for h in hits:
+                meta = h.get("meta",{})
+                if meta.get("name")==key and meta.get("kind")=="system":
+                    sys_txt = h.get("text")
+                if meta.get("name")==key and meta.get("kind")=="developer":
+                    dev_txt = h.get("text")
+            if not (sys_txt and dev_txt):
+                print("❌ 未找到完整 Prompt。"); 
+                continue
+            try:
+                trial_msgs = [
+                    {"role":"system","content":sys_txt},
+                    {"role":"developer","content":dev_txt},
+                    {"role":"user","content":question}
+                ]
+                trial = client.chat.completions.create(model=CHAT_MODEL, temperature=0.7, messages=trial_msgs)
+                ans = (trial.choices[0].message.content or "").strip()
+                print("\n--- A/B 试用回答 ---\n", ans, "\n")
+            except Exception as e:
+                print(f"⚠️ A/B 试用失败：{e}")
+                if DEBUG: traceback.print_exc()
+            continue
         
         # ---- testerr <kind> ：模拟各种错误，验证报错分支 ----
         if user_input.lower().startswith("testerr "):
@@ -288,10 +472,9 @@ def main():
 
         # 短期记忆：写入用户消息
         memory.add("user", user_input)
-
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "developer", "content": DEVELOPER_HINT},
+            {"role": "system", "content": active_system_prompt},
+            {"role": "developer", "content": active_developer_hint},
         ]
         if context_msg:
             messages.append({"role": "system", "content": context_msg})
